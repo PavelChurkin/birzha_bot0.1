@@ -4,7 +4,12 @@ import numpy as np
 from datetime import datetime, timedelta
 import json
 import time
+import logging
 from typing import Dict, List, Optional
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 class MoexTradingBot:
     def __init__(self):
@@ -13,17 +18,18 @@ class MoexTradingBot:
     
     def get_available_stocks(self) -> Dict:
         """Получение списка доступных акций с MOEX"""
+        logger.info("Getting available stocks from MOEX")
         url = f"{self.base_url}/engines/stock/markets/shares/boards/TQBR/securities.json"
         params = {
             'iss.only': 'securities',
             'securities.columns': 'SECID,SHORTNAME,SECNAME,PREVPRICE'   # PREVPRICE - цена предыдущего дня
         }
-        
+
         try:
             response = requests.get(url, params=params)
             data = response.json()
             securities = data['securities']['data']
-            
+
             stocks = {}
             for sec in securities:
                 if sec[3] and sec[3] > 0:  # Фильтр по акциям с ценой
@@ -32,10 +38,11 @@ class MoexTradingBot:
                         'full_name': sec[2],
                         'price': sec[3]
                     }
+            logger.info(f"Loaded {len(stocks)} stocks")
             return stocks
-            
+
         except Exception as e:
-            print(f"Ошибка получения списка акций: {e}")
+            logger.error(f"Error getting available stocks: {e}")
             return {}
     
     def search_stocks(self, query: str) -> Dict:
@@ -53,6 +60,7 @@ class MoexTradingBot:
     
     def get_stock_data(self, symbol: str) -> Optional[Dict]:
         """Получение текущих данных по акции"""
+        logger.info(f"Getting stock data for {symbol}")
         url = f"{self.base_url}/engines/stock/markets/shares/securities/{symbol}.json"
         params = {
             'iss.only': 'marketdata',
@@ -67,6 +75,7 @@ class MoexTradingBot:
             # Найти данные для TQBR
             for item in marketdata:
                 if item[0] == 'TQBR' and item[1] is not None:
+                    logger.info(f"Got data for {symbol}: last={item[1]}")
                     return {
                         'symbol': symbol,
                         'last': item[1],
@@ -78,10 +87,11 @@ class MoexTradingBot:
                         'change': item[7],
                         'timestamp': datetime.now()
                     }
+            logger.warning(f"No TQBR data found for {symbol}")
             return None
 
         except Exception as e:
-            print(f"Ошибка получения данных для {symbol}: {e}")
+            logger.error(f"Error getting data for {symbol}: {e}")
             return None
     
     def get_historical_data(self, symbol: str, days: int = 30) -> Optional[pd.DataFrame]:
@@ -338,21 +348,26 @@ class MoexTradingBot:
     
     def generate_trading_ranges(self, symbol: str) -> Optional[Dict]:
         """Генерация торговых диапазонов для указанной акции"""
+        logger.info(f"Generating trading ranges for {symbol}")
         print(f"🔄 Анализ {symbol}...")
-        
+
         # Получаем данные
         current_data = self.get_stock_data(symbol)
         if not current_data:
+            logger.error(f"Failed to get current data for {symbol}")
             print(f"❌ Не удалось получить данные для {symbol}")
             return None
-        
+
         hist_data = self.get_historical_data(symbol, days=30)
         if hist_data is None or hist_data.empty:
+            logger.error(f"Failed to get historical data for {symbol}")
             print(f"❌ Не удалось получить исторические данные для {symbol}")
             return None
-        
+
         orderbook = self.get_orderbook(symbol)
-        
+        if not orderbook:
+            logger.warning(f"Orderbook not available for {symbol}")
+
         # Расчет уровней
         tech_levels = self.calculate_technical_levels(hist_data)
         # Анализ недельного тренда

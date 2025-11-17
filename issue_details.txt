@@ -1,0 +1,14 @@
+title:	Исправить и улучшить birzha_bot.py
+state:	OPEN
+author:	PavelChurkin
+labels:	
+comments:	0
+assignees:	
+projects:	
+milestone:	
+number:	1
+--
+Нужен бот, который анализирует движение акций фондовой биржи внутри одного дня и выдаёт рекомендации по цене покупки и продажи на основе цен, объема и плотности заявок на покупку и продажу акции в стакане и анализа недельного тренда.
+Из исправлений: в securities.columns PREVADMITTEDQUOTE не существует - нужно заменить.
+и в marketdata.columns VOLUME Не существует - нужно заменить.
+
