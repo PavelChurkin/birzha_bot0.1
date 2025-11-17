@@ -180,14 +180,29 @@ class MoexTradingBot:
         low_close = np.abs(df['low'] - df['close'].shift())
         true_range = np.maximum(high_low, np.maximum(high_close, low_close))
         atr = true_range.rolling(14).mean().iloc[-1] if len(true_range) > 14 else true_range.mean()
-        
+
+        # RSI (Relative Strength Index)
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        rsi_value = rsi.iloc[-1] if len(rsi) > 0 and not np.isnan(rsi.iloc[-1]) else 50
+
+        # Moving Averages
+        sma_20 = df['close'].rolling(20).mean().iloc[-1] if len(df) >= 20 else df['close'].mean()
+        sma_50 = df['close'].rolling(50).mean().iloc[-1] if len(df) >= 50 else df['close'].mean()
+
         return {
             'pivot': round(pivot, 2),
             'resistance_1': round(r1, 2),
             'support_1': round(s1, 2),
             'supports': supports[-3:] if supports else [],
             'resistances': resistances[-3:] if resistances else [],
-            'atr': round(atr, 2)
+            'atr': round(atr, 2),
+            'rsi': round(rsi_value, 2),
+            'sma_20': round(sma_20, 2),
+            'sma_50': round(sma_50, 2)
         }
     
     def analyze_weekly_trend(self, hist_data: pd.DataFrame) -> Dict:
@@ -233,7 +248,7 @@ class MoexTradingBot:
             'weeks_analyzed': len(recent_weeks)
         }
     
-    def analyze_intentionality(self, symbol: str, current_data: Dict, hist_data: pd.DataFrame, orderbook: Optional[Dict], weekly_trend: Dict) -> List:
+    def analyze_intentionality(self, symbol: str, current_data: Dict, hist_data: pd.DataFrame, orderbook: Optional[Dict], weekly_trend: Dict, tech_levels: Dict) -> List:
         """Анализ интенциональности"""
         signals = []
         
@@ -289,12 +304,36 @@ class MoexTradingBot:
             current_price = current_data['last']
             recent_high = hist_data['high'].tail(5).max()
             recent_low = hist_data['low'].tail(5).min()
-            
+
             if current_price >= recent_high * 0.995:
                 signals.append("🚀 ПРИБЛИЖЕНИЕ К МАКСИМУМАМ")
             elif current_price <= recent_low * 1.005:
                 signals.append("📉 ПРИБЛИЖЕНИЕ К МИНИМУМАМ")
-        
+
+        # Анализ RSI
+        rsi = tech_levels.get('rsi')
+        if rsi:
+            if rsi > 70:
+                signals.append(f"⚠️ RSI ПЕРЕКУПЛЕНОСТЬ ({rsi:.1f})")
+            elif rsi < 30:
+                signals.append(f"⚠️ RSI ПЕРЕПРОДАННОСТЬ ({rsi:.1f})")
+            elif rsi > 60:
+                signals.append(f"📈 RSI ВЫШЕ 60 ({rsi:.1f})")
+            elif rsi < 40:
+                signals.append(f"📉 RSI НИЖЕ 40 ({rsi:.1f})")
+
+        # Анализ скользящих средних
+        current_price = current_data['last']
+        sma_20 = tech_levels.get('sma_20')
+        sma_50 = tech_levels.get('sma_50')
+        if sma_20 and sma_50:
+            if current_price > sma_20 > sma_50:
+                signals.append("📈 ЦЕНА ВЫШЕ SMA20 > SMA50")
+            elif current_price > sma_20 and sma_20 < sma_50:
+                signals.append("⚠️ ЦЕНА ВЫШЕ SMA20, НО SMA20 < SMA50")
+            elif current_price < sma_20 < sma_50:
+                signals.append("📉 ЦЕНА НИЖЕ SMA20 < SMA50")
+
         return signals
     
     def generate_trading_ranges(self, symbol: str) -> Optional[Dict]:
@@ -318,7 +357,7 @@ class MoexTradingBot:
         tech_levels = self.calculate_technical_levels(hist_data)
         # Анализ недельного тренда
         weekly_trend = self.analyze_weekly_trend(hist_data)
-        signals = self.analyze_intentionality(symbol, current_data, hist_data, orderbook, weekly_trend)
+        signals = self.analyze_intentionality(symbol, current_data, hist_data, orderbook, weekly_trend, tech_levels)
         
         current_price = current_data['last']
         
@@ -417,6 +456,10 @@ class MoexTradingBot:
         if levels['resistances']:
             print(f"   Сопротивления: {levels['resistances']}")
         print(f"   ATR (волатильность): {levels['atr']}")
+        if 'rsi' in levels:
+            print(f"   RSI: {levels['rsi']}")
+        if 'sma_20' in levels:
+            print(f"   SMA20: {levels['sma_20']} | SMA50: {levels['sma_50']}")
         
         trend = analysis.get('weekly_trend', {})
         if trend:
