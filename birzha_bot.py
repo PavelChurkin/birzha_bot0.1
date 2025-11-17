@@ -16,7 +16,7 @@ class MoexTradingBot:
         url = f"{self.base_url}/engines/stock/markets/shares/boards/TQBR/securities.json"
         params = {
             'iss.only': 'securities',
-            'securities.columns': 'SECID,SHORTNAME,SECNAME,PREVADMITTEDQUOTE'   # PREVADMITTEDQUOTE - Не существует, нужно заменить
+            'securities.columns': 'SECID,SHORTNAME,SECNAME,PREVPRICE'   # PREVPRICE - цена предыдущего дня
         }
         
         try:
@@ -56,7 +56,7 @@ class MoexTradingBot:
         url = f"{self.base_url}/engines/stock/markets/shares/securities/{symbol}.json"
         params = {
             'iss.only': 'marketdata',
-            'marketdata.columns': 'LAST,OPEN,HIGH,LOW,VOLUME,VALUE,LASTTOPREVPRICE'     # VOLUME - Не существует, нужно заменить
+            'marketdata.columns': 'LAST,OPEN,HIGH,LOW,VOLTODAY,VALTODAY,LASTTOPREVPRICE'     # VOLTODAY - объем торгов за день, VALTODAY - стоимость торгов
         }
         
         try:
