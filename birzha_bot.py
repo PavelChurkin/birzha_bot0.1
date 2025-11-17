@@ -201,7 +201,7 @@ class MoexTradingBot:
         }).dropna()
         
         if len(weekly) < 2:
-            return {'trend': 'недостаточно данных', 'strength': 0}
+            return {'trend': 'недостаточно данных', 'strength': 0.0}
         
         # Расчет тренда по последним 4 неделям
         recent_weeks = weekly.tail(4)
