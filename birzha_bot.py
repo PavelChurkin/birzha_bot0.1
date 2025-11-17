@@ -4,7 +4,12 @@ import numpy as np
 from datetime import datetime, timedelta
 import json
 import time
+import logging
 from typing import Dict, List, Optional
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 class MoexTradingBot:
     def __init__(self):
@@ -13,17 +18,18 @@ class MoexTradingBot:
     
     def get_available_stocks(self) -> Dict:
         """Получение списка доступных акций с MOEX"""
+        logger.info("Getting available stocks from MOEX")
         url = f"{self.base_url}/engines/stock/markets/shares/boards/TQBR/securities.json"
         params = {
             'iss.only': 'securities',
-            'securities.columns': 'SECID,SHORTNAME,SECNAME,PREVADMITTEDQUOTE'   # PREVADMITTEDQUOTE - Не существует, нужно заменить
+            'securities.columns': 'SECID,SHORTNAME,SECNAME,PREVPRICE'   # PREVPRICE - цена предыдущего дня
         }
-        
+
         try:
             response = requests.get(url, params=params)
             data = response.json()
             securities = data['securities']['data']
-            
+
             stocks = {}
             for sec in securities:
                 if sec[3] and sec[3] > 0:  # Фильтр по акциям с ценой
@@ -32,10 +38,11 @@ class MoexTradingBot:
                         'full_name': sec[2],
                         'price': sec[3]
                     }
+            logger.info(f"Loaded {len(stocks)} stocks")
             return stocks
-            
+
         except Exception as e:
-            print(f"Ошибка получения списка акций: {e}")
+            logger.error(f"Error getting available stocks: {e}")
             return {}
     
     def search_stocks(self, query: str) -> Dict:
@@ -53,33 +60,38 @@ class MoexTradingBot:
     
     def get_stock_data(self, symbol: str) -> Optional[Dict]:
         """Получение текущих данных по акции"""
+        logger.info(f"Getting stock data for {symbol}")
         url = f"{self.base_url}/engines/stock/markets/shares/securities/{symbol}.json"
         params = {
             'iss.only': 'marketdata',
-            'marketdata.columns': 'LAST,OPEN,HIGH,LOW,VOLUME,VALUE,LASTTOPREVPRICE'     # VOLUME - Не существует, нужно заменить
+            'marketdata.columns': 'BOARDID,LAST,OPEN,HIGH,LOW,VOLTODAY,VALTODAY,LASTTOPREVPRICE'     # VOLTODAY - объем торгов за день, VALTODAY - стоимость торгов
         }
-        
+
         try:
             response = requests.get(url, params=params)
             data = response.json()
             marketdata = data['marketdata']['data']
-            
-            if marketdata and marketdata[0][0] is not None:
-                return {
-                    'symbol': symbol,
-                    'last': marketdata[0][0],
-                    'open': marketdata[0][1],
-                    'high': marketdata[0][2],
-                    'low': marketdata[0][3],
-                    'volume': marketdata[0][4],
-                    'value': marketdata[0][5],
-                    'change': marketdata[0][6],
-                    'timestamp': datetime.now()
-                }
+
+            # Найти данные для TQBR
+            for item in marketdata:
+                if item[0] == 'TQBR' and item[1] is not None:
+                    logger.info(f"Got data for {symbol}: last={item[1]}")
+                    return {
+                        'symbol': symbol,
+                        'last': item[1],
+                        'open': item[2],
+                        'high': item[3],
+                        'low': item[4],
+                        'volume': item[5],
+                        'value': item[6],
+                        'change': item[7],
+                        'timestamp': datetime.now()
+                    }
+            logger.warning(f"No TQBR data found for {symbol}")
             return None
-            
+
         except Exception as e:
-            print(f"Ошибка получения данных для {symbol}: {e}")
+            logger.error(f"Error getting data for {symbol}: {e}")
             return None
     
     def get_historical_data(self, symbol: str, days: int = 30) -> Optional[pd.DataFrame]:
@@ -118,26 +130,28 @@ class MoexTradingBot:
     def get_orderbook(self, symbol: str) -> Optional[Dict]:
         """Получение стакана заявок"""
         url = f"{self.base_url}/engines/stock/markets/shares/securities/{symbol}/orderbook.json"
-        
+
         try:
             response = requests.get(url)
+            if response.status_code != 200 or 'json' not in response.headers.get('content-type', ''):
+                return None
             data = response.json()
             orderbook = data['orderbook']['data']
-            
+
             bids = []
             asks = []
-            
+
             for item in orderbook:
                 if item[0] == 'B' and item[1] and item[2]:
                     bids.append({'price': item[1], 'quantity': item[2]})
                 elif item[0] == 'S' and item[1] and item[2]:
                     asks.append({'price': item[1], 'quantity': item[2]})
-            
+
             return {
                 'bids': sorted(bids, key=lambda x: x['price'], reverse=True)[:10],
                 'asks': sorted(asks, key=lambda x: x['price'])[:10]
             }
-            
+
         except Exception as e:
             print(f"Ошибка получения стакана для {symbol}: {e}")
             return None
@@ -176,17 +190,75 @@ class MoexTradingBot:
         low_close = np.abs(df['low'] - df['close'].shift())
         true_range = np.maximum(high_low, np.maximum(high_close, low_close))
         atr = true_range.rolling(14).mean().iloc[-1] if len(true_range) > 14 else true_range.mean()
-        
+
+        # RSI (Relative Strength Index)
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        rsi_value = rsi.iloc[-1] if len(rsi) > 0 and not np.isnan(rsi.iloc[-1]) else 50
+
+        # Moving Averages
+        sma_20 = df['close'].rolling(20).mean().iloc[-1] if len(df) >= 20 else df['close'].mean()
+        sma_50 = df['close'].rolling(50).mean().iloc[-1] if len(df) >= 50 else df['close'].mean()
+
         return {
             'pivot': round(pivot, 2),
             'resistance_1': round(r1, 2),
             'support_1': round(s1, 2),
             'supports': supports[-3:] if supports else [],
             'resistances': resistances[-3:] if resistances else [],
-            'atr': round(atr, 2)
+            'atr': round(atr, 2),
+            'rsi': round(rsi_value, 2),
+            'sma_20': round(sma_20, 2),
+            'sma_50': round(sma_50, 2)
         }
     
-    def analyze_intentionality(self, symbol: str, current_data: Dict, hist_data: pd.DataFrame, orderbook: Dict) -> List:
+    def analyze_weekly_trend(self, hist_data: pd.DataFrame) -> Dict:
+        """Анализ недельного тренда"""
+        if hist_data.empty or len(hist_data) < 7:
+            return {'trend': 'недостаточно данных', 'strength': 0}
+        
+        # Пересчет на недельные данные
+        weekly = hist_data.resample('W').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+        
+        if len(weekly) < 2:
+            return {'trend': 'недостаточно данных', 'strength': 0.0}
+        
+        # Расчет тренда по последним 4 неделям
+        recent_weeks = weekly.tail(4)
+        closes = recent_weeks['close']
+        
+        # Линейный тренд
+        x = np.arange(len(closes))
+        slope, _ = np.polyfit(x, closes, 1)
+        
+        # Определение тренда
+        if slope > 0.001 * closes.iloc[0]:
+            trend = 'восходящий'
+            strength = min(abs(slope) / closes.iloc[0] * 100, 5)  # сила в %
+        elif slope < -0.001 * closes.iloc[0]:
+            trend = 'нисходящий'
+            strength = min(abs(slope) / closes.iloc[0] * 100, 5)
+        else:
+            trend = 'боковой'
+            strength = 0
+        
+        return {
+            'trend': trend,
+            'strength': round(strength, 2),
+            'slope': round(slope, 4),
+            'weeks_analyzed': len(recent_weeks)
+        }
+    
+    def analyze_intentionality(self, symbol: str, current_data: Dict, hist_data: pd.DataFrame, orderbook: Optional[Dict], weekly_trend: Dict, tech_levels: Dict) -> List:
         """Анализ интенциональности"""
         signals = []
         
@@ -204,6 +276,8 @@ class MoexTradingBot:
         if orderbook:
             bid_volume = sum([bid['quantity'] for bid in orderbook['bids']])
             ask_volume = sum([ask['quantity'] for ask in orderbook['asks']])
+            total_levels = len(orderbook['bids']) + len(orderbook['asks'])
+            density = (bid_volume + ask_volume) / max(total_levels, 1) if total_levels > 0 else 0
             
             if bid_volume + ask_volume > 0:
                 imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume)
@@ -211,40 +285,94 @@ class MoexTradingBot:
                     signals.append("🟢 ПРЕОБЛАДАЮТ ПОКУПКИ")
                 elif imbalance < -0.3:
                     signals.append("🔴 ПРЕОБЛАДАЮТ ПРОДАЖИ")
+            
+            # Анализ плотности заявок
+            if density > 10000:  # Высокая плотность
+                signals.append("📊 ВЫСОКАЯ ПЛОТНОСТЬ ЗАЯВОК")
+            elif density < 1000:  # Низкая плотность
+                signals.append("📉 НИЗКАЯ ПЛОТНОСТЬ ЗАЯВОК")
+            
+            # Анализ спреда
+            if orderbook['bids'] and orderbook['asks']:
+                best_bid = max(bid['price'] for bid in orderbook['bids'])
+                best_ask = min(ask['price'] for ask in orderbook['asks'])
+                spread = best_ask - best_bid
+                spread_pct = spread / best_bid * 100
+                if spread_pct < 0.1:
+                    signals.append("💰 УЗКИЙ СПРЕД (высокая ликвидность)")
+                elif spread_pct > 1:
+                    signals.append("📏 ШИРОКИЙ СПРЕД (низкая ликвидность)")
+        
+        # Анализ недельного тренда
+        if weekly_trend['trend'] == 'восходящий':
+            signals.append(f"📈 НЕДЕЛЬНЫЙ ТРЕНД ВВЕРХ (сила: {weekly_trend['strength']}%)")
+        elif weekly_trend['trend'] == 'нисходящий':
+            signals.append(f"📉 НЕДЕЛЬНЫЙ ТРЕНД ВНИЗ (сила: {weekly_trend['strength']}%)")
         
         # Анализ импульса
         if not hist_data.empty and len(hist_data) > 5:
             current_price = current_data['last']
             recent_high = hist_data['high'].tail(5).max()
             recent_low = hist_data['low'].tail(5).min()
-            
+
             if current_price >= recent_high * 0.995:
                 signals.append("🚀 ПРИБЛИЖЕНИЕ К МАКСИМУМАМ")
             elif current_price <= recent_low * 1.005:
                 signals.append("📉 ПРИБЛИЖЕНИЕ К МИНИМУМАМ")
-        
+
+        # Анализ RSI
+        rsi = tech_levels.get('rsi')
+        if rsi:
+            if rsi > 70:
+                signals.append(f"⚠️ RSI ПЕРЕКУПЛЕНОСТЬ ({rsi:.1f})")
+            elif rsi < 30:
+                signals.append(f"⚠️ RSI ПЕРЕПРОДАННОСТЬ ({rsi:.1f})")
+            elif rsi > 60:
+                signals.append(f"📈 RSI ВЫШЕ 60 ({rsi:.1f})")
+            elif rsi < 40:
+                signals.append(f"📉 RSI НИЖЕ 40 ({rsi:.1f})")
+
+        # Анализ скользящих средних
+        current_price = current_data['last']
+        sma_20 = tech_levels.get('sma_20')
+        sma_50 = tech_levels.get('sma_50')
+        if sma_20 and sma_50:
+            if current_price > sma_20 > sma_50:
+                signals.append("📈 ЦЕНА ВЫШЕ SMA20 > SMA50")
+            elif current_price > sma_20 and sma_20 < sma_50:
+                signals.append("⚠️ ЦЕНА ВЫШЕ SMA20, НО SMA20 < SMA50")
+            elif current_price < sma_20 < sma_50:
+                signals.append("📉 ЦЕНА НИЖЕ SMA20 < SMA50")
+
         return signals
     
     def generate_trading_ranges(self, symbol: str) -> Optional[Dict]:
         """Генерация торговых диапазонов для указанной акции"""
+        logger.info(f"Generating trading ranges for {symbol}")
         print(f"🔄 Анализ {symbol}...")
-        
+
         # Получаем данные
         current_data = self.get_stock_data(symbol)
         if not current_data:
+            logger.error(f"Failed to get current data for {symbol}")
             print(f"❌ Не удалось получить данные для {symbol}")
             return None
-        
+
         hist_data = self.get_historical_data(symbol, days=30)
         if hist_data is None or hist_data.empty:
+            logger.error(f"Failed to get historical data for {symbol}")
             print(f"❌ Не удалось получить исторические данные для {symbol}")
             return None
-        
+
         orderbook = self.get_orderbook(symbol)
-        
+        if not orderbook:
+            logger.warning(f"Orderbook not available for {symbol}")
+
         # Расчет уровней
         tech_levels = self.calculate_technical_levels(hist_data)
-        signals = self.analyze_intentionality(symbol, current_data, hist_data, orderbook)
+        # Анализ недельного тренда
+        weekly_trend = self.analyze_weekly_trend(hist_data)
+        signals = self.analyze_intentionality(symbol, current_data, hist_data, orderbook, weekly_trend, tech_levels)
         
         current_price = current_data['last']
         
@@ -268,10 +396,16 @@ class MoexTradingBot:
             recommendation = "🟡 ДЕРЖАТЬ"
             confidence = 0.5
         
-        # Увеличиваем уверенность при сильных сигналах
+        # Увеличиваем уверенность при сильных сигналах и тренде
         strong_signals = [s for s in signals if '💥' in s or '🚀' in s or '📉' in s]
         if strong_signals:
             confidence = min(confidence + 0.2, 0.9)
+        
+        # Корректировка по тренду
+        if weekly_trend['trend'] == 'восходящий' and recommendation == 'ПОКУПАТЬ':
+            confidence = min(confidence + 0.1, 0.95)
+        elif weekly_trend['trend'] == 'нисходящий' and recommendation == 'ПРОДАВАТЬ':
+            confidence = min(confidence + 0.1, 0.95)
         
         return {
             'symbol': symbol,
@@ -290,6 +424,7 @@ class MoexTradingBot:
                 }
             },
             'technical_levels': tech_levels,
+            'weekly_trend': weekly_trend,
             'signals': signals,
             'recommendation': recommendation,
             'confidence': confidence,
@@ -309,7 +444,7 @@ class MoexTradingBot:
         # Сортируем по уверенности рекомендации
         return sorted(results, key=lambda x: x['confidence'], reverse=True)
     
-    def print_analysis(self, analysis: Dict):
+    def print_analysis(self, analysis: Optional[Dict]):
         """Красивый вывод анализа"""
         if not analysis:
             return
@@ -336,6 +471,14 @@ class MoexTradingBot:
         if levels['resistances']:
             print(f"   Сопротивления: {levels['resistances']}")
         print(f"   ATR (волатильность): {levels['atr']}")
+        if 'rsi' in levels:
+            print(f"   RSI: {levels['rsi']}")
+        if 'sma_20' in levels:
+            print(f"   SMA20: {levels['sma_20']} | SMA50: {levels['sma_50']}")
+        
+        trend = analysis.get('weekly_trend', {})
+        if trend:
+            print(f"   Недельный тренд: {trend.get('trend', 'N/A')} (сила: {trend.get('strength', 0)}%)")
         
         if analysis['signals']:
             print(f"\n📡 СИГНАЛЫ:")
