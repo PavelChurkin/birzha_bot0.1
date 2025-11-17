@@ -186,7 +186,50 @@ class MoexTradingBot:
             'atr': round(atr, 2)
         }
     
-    def analyze_intentionality(self, symbol: str, current_data: Dict, hist_data: pd.DataFrame, orderbook: Dict) -> List:
+    def analyze_weekly_trend(self, hist_data: pd.DataFrame) -> Dict:
+        """Анализ недельного тренда"""
+        if hist_data.empty or len(hist_data) < 7:
+            return {'trend': 'недостаточно данных', 'strength': 0}
+        
+        # Пересчет на недельные данные
+        weekly = hist_data.resample('W').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+        
+        if len(weekly) < 2:
+            return {'trend': 'недостаточно данных', 'strength': 0}
+        
+        # Расчет тренда по последним 4 неделям
+        recent_weeks = weekly.tail(4)
+        closes = recent_weeks['close']
+        
+        # Линейный тренд
+        x = np.arange(len(closes))
+        slope, _ = np.polyfit(x, closes, 1)
+        
+        # Определение тренда
+        if slope > 0.001 * closes.iloc[0]:
+            trend = 'восходящий'
+            strength = min(abs(slope) / closes.iloc[0] * 100, 5)  # сила в %
+        elif slope < -0.001 * closes.iloc[0]:
+            trend = 'нисходящий'
+            strength = min(abs(slope) / closes.iloc[0] * 100, 5)
+        else:
+            trend = 'боковой'
+            strength = 0
+        
+        return {
+            'trend': trend,
+            'strength': round(strength, 2),
+            'slope': round(slope, 4),
+            'weeks_analyzed': len(recent_weeks)
+        }
+    
+    def analyze_intentionality(self, symbol: str, current_data: Dict, hist_data: pd.DataFrame, orderbook: Optional[Dict], weekly_trend: Dict) -> List:
         """Анализ интенциональности"""
         signals = []
         
@@ -211,6 +254,12 @@ class MoexTradingBot:
                     signals.append("🟢 ПРЕОБЛАДАЮТ ПОКУПКИ")
                 elif imbalance < -0.3:
                     signals.append("🔴 ПРЕОБЛАДАЮТ ПРОДАЖИ")
+        
+        # Анализ недельного тренда
+        if weekly_trend['trend'] == 'восходящий':
+            signals.append(f"📈 НЕДЕЛЬНЫЙ ТРЕНД ВВЕРХ (сила: {weekly_trend['strength']}%)")
+        elif weekly_trend['trend'] == 'нисходящий':
+            signals.append(f"📉 НЕДЕЛЬНЫЙ ТРЕНД ВНИЗ (сила: {weekly_trend['strength']}%)")
         
         # Анализ импульса
         if not hist_data.empty and len(hist_data) > 5:
@@ -268,10 +317,16 @@ class MoexTradingBot:
             recommendation = "🟡 ДЕРЖАТЬ"
             confidence = 0.5
         
-        # Увеличиваем уверенность при сильных сигналах
+        # Увеличиваем уверенность при сильных сигналах и тренде
         strong_signals = [s for s in signals if '💥' in s or '🚀' in s or '📉' in s]
         if strong_signals:
             confidence = min(confidence + 0.2, 0.9)
+        
+        # Корректировка по тренду
+        if weekly_trend['trend'] == 'восходящий' and recommendation == 'ПОКУПАТЬ':
+            confidence = min(confidence + 0.1, 0.95)
+        elif weekly_trend['trend'] == 'нисходящий' and recommendation == 'ПРОДАВАТЬ':
+            confidence = min(confidence + 0.1, 0.95)
         
         return {
             'symbol': symbol,
@@ -290,6 +345,7 @@ class MoexTradingBot:
                 }
             },
             'technical_levels': tech_levels,
+            'weekly_trend': weekly_trend,
             'signals': signals,
             'recommendation': recommendation,
             'confidence': confidence,
@@ -309,7 +365,7 @@ class MoexTradingBot:
         # Сортируем по уверенности рекомендации
         return sorted(results, key=lambda x: x['confidence'], reverse=True)
     
-    def print_analysis(self, analysis: Dict):
+    def print_analysis(self, analysis: Optional[Dict]):
         """Красивый вывод анализа"""
         if not analysis:
             return
@@ -336,6 +392,10 @@ class MoexTradingBot:
         if levels['resistances']:
             print(f"   Сопротивления: {levels['resistances']}")
         print(f"   ATR (волатильность): {levels['atr']}")
+        
+        trend = analysis.get('weekly_trend', {})
+        if trend:
+            print(f"   Недельный тренд: {trend.get('trend', 'N/A')} (сила: {trend.get('strength', 0)}%)")
         
         if analysis['signals']:
             print(f"\n📡 СИГНАЛЫ:")
