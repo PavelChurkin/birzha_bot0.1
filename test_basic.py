@@ -23,11 +23,13 @@ class TestMoexTradingBot(unittest.TestCase):
     @patch('birzha_bot.requests.get')
     def test_get_stock_data(self, mock_get):
         mock_response = MagicMock()
+        mock_response.headers = {'content-type': 'application/json'}
         mock_response.json.return_value = {
             'marketdata': {
                 'data': [['TQBR', 100.0, 99.0, 101.0, 98.0, 1000, 100000, 1.0]]
             }
         }
+        mock_response.raise_for_status.return_value = None
         mock_get.return_value = mock_response
         data = self.bot.get_stock_data('TEST')
         self.assertIsNotNone(data)
