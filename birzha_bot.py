@@ -56,28 +56,30 @@ class MoexTradingBot:
         url = f"{self.base_url}/engines/stock/markets/shares/securities/{symbol}.json"
         params = {
             'iss.only': 'marketdata',
-            'marketdata.columns': 'LAST,OPEN,HIGH,LOW,VOLTODAY,VALTODAY,LASTTOPREVPRICE'     # VOLTODAY - объем торгов за день, VALTODAY - стоимость торгов
+            'marketdata.columns': 'BOARDID,LAST,OPEN,HIGH,LOW,VOLTODAY,VALTODAY,LASTTOPREVPRICE'     # VOLTODAY - объем торгов за день, VALTODAY - стоимость торгов
         }
-        
+
         try:
             response = requests.get(url, params=params)
             data = response.json()
             marketdata = data['marketdata']['data']
-            
-            if marketdata and marketdata[0][0] is not None:
-                return {
-                    'symbol': symbol,
-                    'last': marketdata[0][0],
-                    'open': marketdata[0][1],
-                    'high': marketdata[0][2],
-                    'low': marketdata[0][3],
-                    'volume': marketdata[0][4],
-                    'value': marketdata[0][5],
-                    'change': marketdata[0][6],
-                    'timestamp': datetime.now()
-                }
+
+            # Найти данные для TQBR
+            for item in marketdata:
+                if item[0] == 'TQBR' and item[1] is not None:
+                    return {
+                        'symbol': symbol,
+                        'last': item[1],
+                        'open': item[2],
+                        'high': item[3],
+                        'low': item[4],
+                        'volume': item[5],
+                        'value': item[6],
+                        'change': item[7],
+                        'timestamp': datetime.now()
+                    }
             return None
-            
+
         except Exception as e:
             print(f"Ошибка получения данных для {symbol}: {e}")
             return None
@@ -118,26 +120,28 @@ class MoexTradingBot:
     def get_orderbook(self, symbol: str) -> Optional[Dict]:
         """Получение стакана заявок"""
         url = f"{self.base_url}/engines/stock/markets/shares/securities/{symbol}/orderbook.json"
-        
+
         try:
             response = requests.get(url)
+            if response.status_code != 200 or 'json' not in response.headers.get('content-type', ''):
+                return None
             data = response.json()
             orderbook = data['orderbook']['data']
-            
+
             bids = []
             asks = []
-            
+
             for item in orderbook:
                 if item[0] == 'B' and item[1] and item[2]:
                     bids.append({'price': item[1], 'quantity': item[2]})
                 elif item[0] == 'S' and item[1] and item[2]:
                     asks.append({'price': item[1], 'quantity': item[2]})
-            
+
             return {
                 'bids': sorted(bids, key=lambda x: x['price'], reverse=True)[:10],
                 'asks': sorted(asks, key=lambda x: x['price'])[:10]
             }
-            
+
         except Exception as e:
             print(f"Ошибка получения стакана для {symbol}: {e}")
             return None
