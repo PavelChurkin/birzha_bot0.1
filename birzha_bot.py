@@ -247,6 +247,8 @@ class MoexTradingBot:
         if orderbook:
             bid_volume = sum([bid['quantity'] for bid in orderbook['bids']])
             ask_volume = sum([ask['quantity'] for ask in orderbook['asks']])
+            total_levels = len(orderbook['bids']) + len(orderbook['asks'])
+            density = (bid_volume + ask_volume) / max(total_levels, 1) if total_levels > 0 else 0
             
             if bid_volume + ask_volume > 0:
                 imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume)
@@ -254,6 +256,23 @@ class MoexTradingBot:
                     signals.append("🟢 ПРЕОБЛАДАЮТ ПОКУПКИ")
                 elif imbalance < -0.3:
                     signals.append("🔴 ПРЕОБЛАДАЮТ ПРОДАЖИ")
+            
+            # Анализ плотности заявок
+            if density > 10000:  # Высокая плотность
+                signals.append("📊 ВЫСОКАЯ ПЛОТНОСТЬ ЗАЯВОК")
+            elif density < 1000:  # Низкая плотность
+                signals.append("📉 НИЗКАЯ ПЛОТНОСТЬ ЗАЯВОК")
+            
+            # Анализ спреда
+            if orderbook['bids'] and orderbook['asks']:
+                best_bid = max(bid['price'] for bid in orderbook['bids'])
+                best_ask = min(ask['price'] for ask in orderbook['asks'])
+                spread = best_ask - best_bid
+                spread_pct = spread / best_bid * 100
+                if spread_pct < 0.1:
+                    signals.append("💰 УЗКИЙ СПРЕД (высокая ликвидность)")
+                elif spread_pct > 1:
+                    signals.append("📏 ШИРОКИЙ СПРЕД (низкая ликвидность)")
         
         # Анализ недельного тренда
         if weekly_trend['trend'] == 'восходящий':
@@ -293,7 +312,9 @@ class MoexTradingBot:
         
         # Расчет уровней
         tech_levels = self.calculate_technical_levels(hist_data)
-        signals = self.analyze_intentionality(symbol, current_data, hist_data, orderbook)
+        # Анализ недельного тренда
+        weekly_trend = self.analyze_weekly_trend(hist_data)
+        signals = self.analyze_intentionality(symbol, current_data, hist_data, orderbook, weekly_trend)
         
         current_price = current_data['last']
         
