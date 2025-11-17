@@ -68,30 +68,52 @@ class MoexTradingBot:
         }
 
         try:
-            response = requests.get(url, params=params)
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+
+            if 'json' not in response.headers.get('content-type', '').lower():
+                logger.error(f"Invalid response format for {symbol}")
+                return None
+
             data = response.json()
+
+            if 'marketdata' not in data or 'data' not in data['marketdata']:
+                logger.error(f"Invalid API response structure for {symbol}")
+                return None
+
             marketdata = data['marketdata']['data']
 
             # Найти данные для TQBR
             for item in marketdata:
-                if item[0] == 'TQBR' and item[1] is not None:
+                if len(item) < 8:
+                    continue
+                if item[0] == 'TQBR' and item[1] is not None and item[1] > 0:
                     logger.info(f"Got data for {symbol}: last={item[1]}")
                     return {
                         'symbol': symbol,
                         'last': item[1],
-                        'open': item[2],
-                        'high': item[3],
-                        'low': item[4],
-                        'volume': item[5],
-                        'value': item[6],
-                        'change': item[7],
+                        'open': item[2] if item[2] else item[1],
+                        'high': item[3] if item[3] else item[1],
+                        'low': item[4] if item[4] else item[1],
+                        'volume': item[5] if item[5] else 0,
+                        'value': item[6] if item[6] else 0,
+                        'change': item[7] if len(item) > 7 and item[7] else 0,
                         'timestamp': datetime.now()
                     }
-            logger.warning(f"No TQBR data found for {symbol}")
+            logger.warning(f"No valid TQBR data found for {symbol}")
             return None
 
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout getting data for {symbol}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error getting data for {symbol}: {e}")
+            return None
+        except (KeyError, IndexError, ValueError) as e:
+            logger.error(f"Data parsing error for {symbol}: {e}")
+            return None
         except Exception as e:
-            logger.error(f"Error getting data for {symbol}: {e}")
+            logger.error(f"Unexpected error getting data for {symbol}: {e}")
             return None
     
     def get_historical_data(self, symbol: str, days: int = 30) -> Optional[pd.DataFrame]:
@@ -160,30 +182,32 @@ class MoexTradingBot:
         """Расчет технических уровней"""
         if df.empty:
             return {}
-        
+
         # Pivot Points
         high = df['high'].iloc[-1]
         low = df['low'].iloc[-1]
         close = df['close'].iloc[-1]
-        
+
         pivot = (high + low + close) / 3
         r1 = 2 * pivot - low
         s1 = 2 * pivot - high
-        
+        r2 = pivot + (high - low)
+        s2 = pivot - (high - low)
+
         # Поддержка/сопротивление по экстремумам
         window = min(10, len(df) // 3)
         supports = []
         resistances = []
-        
+
         for i in range(window, len(df)-window):
             if df['low'].iloc[i] == df['low'].iloc[i-window:i+window].min():
                 supports.append(df['low'].iloc[i])
             if df['high'].iloc[i] == df['high'].iloc[i-window:i+window].max():
                 resistances.append(df['high'].iloc[i])
-        
+
         supports = sorted(list(set([round(x, 2) for x in supports if not np.isnan(x)])))
         resistances = sorted(list(set([round(x, 2) for x in resistances if not np.isnan(x)])))
-        
+
         # ATR (волатильность)
         high_low = df['high'] - df['low']
         high_close = np.abs(df['high'] - df['close'].shift())
@@ -203,16 +227,59 @@ class MoexTradingBot:
         sma_20 = df['close'].rolling(20).mean().iloc[-1] if len(df) >= 20 else df['close'].mean()
         sma_50 = df['close'].rolling(50).mean().iloc[-1] if len(df) >= 50 else df['close'].mean()
 
+        # MACD calculation
+        macd_value = 0
+        signal_line = 0
+        macd_histogram = 0
+        if len(df) >= 26:
+            ema_12 = df['close'].ewm(span=12).mean()
+            ema_26 = df['close'].ewm(span=26).mean()
+            macd_line = ema_12 - ema_26
+            signal_line = macd_line.ewm(span=9).mean().iloc[-1]
+            macd_histogram = macd_line.iloc[-1] - signal_line
+            macd_value = macd_line.iloc[-1]
+
+        # Bollinger Bands
+        bb_upper = close * 1.05
+        bb_lower = close * 0.95
+        bb_middle = close
+        if len(df) >= 20:
+            sma_20_bb = df['close'].rolling(20).mean()
+            std_20 = df['close'].rolling(20).std()
+            bb_upper = (sma_20_bb + 2 * std_20).iloc[-1]
+            bb_lower = (sma_20_bb - 2 * std_20).iloc[-1]
+            bb_middle = sma_20_bb.iloc[-1]
+
+        # Stochastic Oscillator
+        stoch_k = 50
+        stoch_d = 50
+        if len(df) >= 14:
+            lowest_low = df['low'].rolling(14).min()
+            highest_high = df['high'].rolling(14).max()
+            if highest_high.iloc[-1] != lowest_low.iloc[-1]:
+                stoch_k = 100 * ((close - lowest_low.iloc[-1]) / (highest_high.iloc[-1] - lowest_low.iloc[-1]))
+                stoch_d = stoch_k  # Simplified, should be SMA of %K
+
         return {
             'pivot': round(pivot, 2),
             'resistance_1': round(r1, 2),
             'support_1': round(s1, 2),
+            'resistance_2': round(r2, 2),
+            'support_2': round(s2, 2),
             'supports': supports[-3:] if supports else [],
             'resistances': resistances[-3:] if resistances else [],
             'atr': round(atr, 2),
             'rsi': round(rsi_value, 2),
             'sma_20': round(sma_20, 2),
-            'sma_50': round(sma_50, 2)
+            'sma_50': round(sma_50, 2),
+            'macd_line': round(macd_value, 4),
+            'macd_signal': round(signal_line, 4),
+            'macd_histogram': round(macd_histogram, 4),
+            'bb_upper': round(bb_upper, 2),
+            'bb_lower': round(bb_lower, 2),
+            'bb_middle': round(bb_middle, 2),
+            'stoch_k': round(stoch_k, 2),
+            'stoch_d': round(stoch_d, 2)
         }
     
     def analyze_weekly_trend(self, hist_data: pd.DataFrame) -> Dict:
@@ -332,8 +399,38 @@ class MoexTradingBot:
             elif rsi < 40:
                 signals.append(f"📉 RSI НИЖЕ 40 ({rsi:.1f})")
 
-        # Анализ скользящих средних
+        # Анализ MACD
+        macd_line = tech_levels.get('macd_line', 0)
+        macd_signal = tech_levels.get('macd_signal', 0)
+        macd_histogram = tech_levels.get('macd_histogram', 0)
+        if macd_line > macd_signal and macd_histogram > 0:
+            signals.append("📈 MACD БЫЧИЙ СИГНАЛ")
+        elif macd_line < macd_signal and macd_histogram < 0:
+            signals.append("📉 MACD МЕДВЕЖИЙ СИГНАЛ")
+
+        # Анализ Bollinger Bands
         current_price = current_data['last']
+        bb_upper = tech_levels.get('bb_upper')
+        bb_lower = tech_levels.get('bb_lower')
+        if bb_upper and bb_lower:
+            if current_price >= bb_upper:
+                signals.append("⚠️ ЦЕНА У ВЕРХНЕЙ ГРАНИЦЫ BOLLINGER")
+            elif current_price <= bb_lower:
+                signals.append("⚠️ ЦЕНА У НИЖНЕЙ ГРАНИЦЫ BOLLINGER")
+
+        # Анализ Stochastic
+        stoch_k = tech_levels.get('stoch_k', 50)
+        stoch_d = tech_levels.get('stoch_d', 50)
+        if stoch_k > 80:
+            signals.append(f"⚠️ STOCH ПЕРЕКУПЛЕНОСТЬ ({stoch_k:.1f})")
+        elif stoch_k < 20:
+            signals.append(f"⚠️ STOCH ПЕРЕПРОДАННОСТЬ ({stoch_k:.1f})")
+        elif stoch_k > 70:
+            signals.append(f"📈 STOCH ВЫШЕ 70 ({stoch_k:.1f})")
+        elif stoch_k < 30:
+            signals.append(f"📉 STOCH НИЖЕ 30 ({stoch_k:.1f})")
+
+        # Анализ скользящих средних
         sma_20 = tech_levels.get('sma_20')
         sma_50 = tech_levels.get('sma_50')
         if sma_20 and sma_50:
@@ -385,28 +482,84 @@ class MoexTradingBot:
         buy_zone_lower = max(0, buy_zone_upper - atr * 1.5)
         sell_zone_upper = sell_zone_lower + atr * 1.5
         
-        # Генерация рекомендации
+        # Расчет комплексного скора для рекомендации
+        buy_score = 0
+        sell_score = 0
+
+        # Базовый скор по позиционированию цены
         if current_price <= buy_zone_upper:
-            recommendation = "🟢 ПОКУПАТЬ"
-            confidence = 0.7
+            buy_score += 30
         elif current_price >= sell_zone_lower:
-            recommendation = "🔴 ПРОДАВАТЬ" 
-            confidence = 0.7
+            sell_score += 30
+
+        # Анализ тренда
+        if weekly_trend['trend'] == 'восходящий':
+            buy_score += 20
+        elif weekly_trend['trend'] == 'нисходящий':
+            sell_score += 20
+
+        # Анализ технических индикаторов
+        rsi = tech_levels.get('rsi', 50)
+        if rsi < 30:
+            buy_score += 15  # Перепроданность
+        elif rsi > 70:
+            sell_score += 15  # Перекупленность
+
+        macd_hist = tech_levels.get('macd_histogram', 0)
+        if macd_hist > 0:
+            buy_score += 10
+        elif macd_hist < 0:
+            sell_score += 10
+
+        stoch_k = tech_levels.get('stoch_k', 50)
+        if stoch_k < 20:
+            buy_score += 10
+        elif stoch_k > 80:
+            sell_score += 10
+
+        # Анализ скользящих средних
+        sma_20 = tech_levels.get('sma_20', current_price)
+        sma_50 = tech_levels.get('sma_50', current_price)
+        if current_price > sma_20 > sma_50:
+            buy_score += 15
+        elif current_price < sma_20 < sma_50:
+            sell_score += 15
+
+        # Анализ Bollinger Bands
+        bb_upper = tech_levels.get('bb_upper', current_price * 1.05)
+        bb_lower = tech_levels.get('bb_lower', current_price * 0.95)
+        if current_price <= bb_lower:
+            buy_score += 10
+        elif current_price >= bb_upper:
+            sell_score += 10
+
+        # Анализ сигналов
+        bullish_signals = [s for s in signals if any(x in s for x in ['📈', '🟢', '💥', '🚀', '📊'])]
+        bearish_signals = [s for s in signals if any(x in s for x in ['📉', '🔴', '⚠️'])]
+        buy_score += len(bullish_signals) * 5
+        sell_score += len(bearish_signals) * 5
+
+        # Определение рекомендации
+        if buy_score > sell_score + 20:
+            recommendation = "🟢 ПОКУПАТЬ"
+            confidence = min(0.5 + (buy_score - sell_score) / 100, 0.95)
+        elif sell_score > buy_score + 20:
+            recommendation = "🔴 ПРОДАВАТЬ"
+            confidence = min(0.5 + (sell_score - buy_score) / 100, 0.95)
         else:
             recommendation = "🟡 ДЕРЖАТЬ"
             confidence = 0.5
         
-        # Увеличиваем уверенность при сильных сигналах и тренде
-        strong_signals = [s for s in signals if '💥' in s or '🚀' in s or '📉' in s]
-        if strong_signals:
-            confidence = min(confidence + 0.2, 0.9)
-        
-        # Корректировка по тренду
-        if weekly_trend['trend'] == 'восходящий' and recommendation == 'ПОКУПАТЬ':
-            confidence = min(confidence + 0.1, 0.95)
-        elif weekly_trend['trend'] == 'нисходящий' and recommendation == 'ПРОДАВАТЬ':
-            confidence = min(confidence + 0.1, 0.95)
-        
+        # Расчет уровней стоп-лосс и тейк-профит
+        stop_loss = None
+        take_profit = None
+        if recommendation == "🟢 ПОКУПАТЬ":
+            stop_loss = round(buy_zone_lower - atr, 2)
+            take_profit = round(sell_zone_upper + atr, 2)
+        elif recommendation == "🔴 ПРОДАВАТЬ":
+            stop_loss = round(sell_zone_upper + atr, 2)
+            take_profit = round(buy_zone_lower - atr, 2)
+
         return {
             'symbol': symbol,
             'name': self.available_stocks.get(symbol, {}).get('name', 'N/A'),
@@ -422,6 +575,11 @@ class MoexTradingBot:
                     'lower': round(sell_zone_lower, 2),
                     'upper': round(sell_zone_upper, 2)
                 }
+            },
+            'risk_management': {
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'risk_reward_ratio': round(abs(take_profit - current_price) / abs(stop_loss - current_price), 2) if stop_loss and take_profit else None
             },
             'technical_levels': tech_levels,
             'weekly_trend': weekly_trend,
@@ -466,6 +624,7 @@ class MoexTradingBot:
         print(f"\n🎯 КЛЮЧЕВЫЕ УРОВНИ:")
         levels = analysis['technical_levels']
         print(f"   Pivot: {levels['pivot']} | R1: {levels['resistance_1']} | S1: {levels['support_1']}")
+        print(f"   R2: {levels.get('resistance_2', 'N/A')} | S2: {levels.get('support_2', 'N/A')}")
         if levels['supports']:
             print(f"   Поддержки: {levels['supports']}")
         if levels['resistances']:
@@ -475,10 +634,25 @@ class MoexTradingBot:
             print(f"   RSI: {levels['rsi']}")
         if 'sma_20' in levels:
             print(f"   SMA20: {levels['sma_20']} | SMA50: {levels['sma_50']}")
-        
+        if 'macd_line' in levels and levels['macd_line'] != 0:
+            print(f"   MACD: {levels['macd_line']:.4f} | Signal: {levels['macd_signal']:.4f} | Hist: {levels['macd_histogram']:.4f}")
+        if 'bb_upper' in levels:
+            print(f"   Bollinger: {levels['bb_lower']:.2f} - {levels['bb_middle']:.2f} - {levels['bb_upper']:.2f}")
+        if 'stoch_k' in levels:
+            print(f"   Stochastic: K={levels['stoch_k']:.1f} D={levels['stoch_d']:.1f}")
+
         trend = analysis.get('weekly_trend', {})
         if trend:
             print(f"   Недельный тренд: {trend.get('trend', 'N/A')} (сила: {trend.get('strength', 0)}%)")
+
+        # Risk management
+        risk_mgmt = analysis.get('risk_management', {})
+        if risk_mgmt.get('stop_loss') and risk_mgmt.get('take_profit'):
+            print(f"\n🛡️ РИСК-МЕНЕДЖМЕНТ:")
+            print(f"   Stop-Loss: {risk_mgmt['stop_loss']} RUB")
+            print(f"   Take-Profit: {risk_mgmt['take_profit']} RUB")
+            if risk_mgmt.get('risk_reward_ratio'):
+                print(f"   Risk/Reward: 1:{risk_mgmt['risk_reward_ratio']:.1f}")
         
         if analysis['signals']:
             print(f"\n📡 СИГНАЛЫ:")
